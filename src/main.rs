@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
                     tracing::info!(
-                        "LeylineEnvoy processing request: {} {} {:?}",
+                        "LeylineRabbit processing request: {} {} {:?}",
                         request.method(),
                         request.uri(),
                         request.version()
@@ -163,14 +163,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .on_response(|response: &axum::http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
                     tracing::info!(
-                        "LeylineEnvoy completed request: status={}, latency={:?}",
+                        "LeylineRabbit completed request: status={}, latency={:?}",
                         response.status(),
                         latency
                     );
                 })
                 .on_failure(|error: tower_http::classify::ServerErrorsFailureClass, latency: std::time::Duration, _span: &tracing::Span| {
                     tracing::error!(
-                        "LeylineEnvoy request failed: error={:?}, latency={:?}",
+                        "LeylineRabbit request failed: error={:?}, latency={:?}",
                         error,
                         latency
                     );
@@ -179,21 +179,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Run our app with hyper
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000)); // Different port: 4000
-    tracing::info!("LeylineEnvoy starting on {}", addr);
+    tracing::info!("LeylineRabbit starting on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "LeylineEnvoy OK")
+    (StatusCode::OK, "LeylineRabbit OK")
 }
 
 // async fn envoy_status_handler() -> impl IntoResponse {
 //     (
 //         StatusCode::OK,
 //         axum::Json(serde_json::json!({
-//             "service": "LeylineEnvoy",
+//             "service": "LeylineRabbit",
 //             "version": "0.1.0",
 //             "status": "healthy",
 //             "description": "Advanced API Gateway with load balancing and retry",
@@ -240,26 +240,26 @@ async fn proxy_handler(
     let primary_upstream_url = upstream_service.get_next_upstream();
     let primary_uri = uri_template.replace("{}", primary_upstream_url);
 
-    tracing::debug!("LeylineEnvoy routing to upstream server: {}", primary_upstream_url);
+    tracing::debug!("LeylineRabbit routing to upstream server: {}", primary_upstream_url);
 
     match client.get(&primary_uri).send().await {
         Ok(response) => {
             if response.status().is_success() {
-                tracing::debug!("LeylineEnvoy successful response from: {}", primary_upstream_url);
+                tracing::debug!("LeylineRabbit successful response from: {}", primary_upstream_url);
                 let body = response.text().await?;
                 return Ok((StatusCode::OK, body).into_response());
             } else {
                 let status = response.status();
-                tracing::warn!("LeylineEnvoy primary upstream server {} returned error status: {}", primary_upstream_url, status);
+                tracing::warn!("LeylineRabbit primary upstream server {} returned error status: {}", primary_upstream_url, status);
             }
         }
         Err(e) => {
-            tracing::warn!("LeylineEnvoy failed to connect to primary upstream server {}: {}", primary_upstream_url, e);
+            tracing::warn!("LeylineRabbit failed to connect to primary upstream server {}: {}", primary_upstream_url, e);
         }
     }
 
     // Primary server failed, now try other servers as fallback
-    tracing::info!("LeylineEnvoy primary server failed, trying other servers...");
+    tracing::info!("LeylineRabbit primary server failed, trying other servers...");
 
     // Try remaining servers in order (excluding the primary one we just tried)
     let primary_index = upstream_service.upstream_urls.iter().position(|url| url == primary_upstream_url).unwrap();
@@ -269,27 +269,27 @@ async fn proxy_handler(
         let upstream_url = upstream_service.get_upstream_by_index(server_index);
         let upstream_uri = uri_template.replace("{}", upstream_url);
 
-        tracing::debug!("LeylineEnvoy retrying with upstream server: {} (fallback {}/{})",
+        tracing::debug!("LeylineRabbit retrying with upstream server: {} (fallback {}/{})",
                        upstream_url, offset, upstream_service.upstream_urls.len() - 1);
 
         match client.get(&upstream_uri).send().await {
             Ok(response) => {
                 if response.status().is_success() {
-                    tracing::debug!("LeylineEnvoy successful response from fallback server: {}", upstream_url);
+                    tracing::debug!("LeylineRabbit successful response from fallback server: {}", upstream_url);
                     let body = response.text().await?;
                     return Ok((StatusCode::OK, body).into_response());
                 } else {
                     let status = response.status();
-                    tracing::warn!("LeylineEnvoy fallback upstream server {} returned error status: {}", upstream_url, status);
+                    tracing::warn!("LeylineRabbit fallback upstream server {} returned error status: {}", upstream_url, status);
                 }
             }
             Err(e) => {
-                tracing::warn!("LeylineEnvoy failed to connect to fallback upstream server {}: {}", upstream_url, e);
+                tracing::warn!("LeylineRabbit failed to connect to fallback upstream server {}: {}", upstream_url, e);
             }
         }
     }
 
     // All servers failed
-    tracing::error!("LeylineEnvoy all upstream servers failed for service {}", upstream_service.prefix);
+    tracing::error!("LeylineRabbit all upstream servers failed for service {}", upstream_service.prefix);
     Err(GatewayError::Internal)
 }
