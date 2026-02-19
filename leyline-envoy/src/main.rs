@@ -73,13 +73,14 @@ impl LoadBalancer {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing with console and file output
-    let file_appender = tracing_appender::rolling::daily("./logs", "leyline-rabbit.log");
+
+    let file_appender = tracing_appender::rolling::daily("./logs", "leyline-envoy.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "leyline_rabbit=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "leyline_envoy=debug,tower_http=debug".into()),
         )
         .with(
             tracing_subscriber::fmt::layer()
@@ -106,18 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         })?;
 
-    /* 
     // Configure upstream services with path prefixes
-    let upstream_services = vec![
-        UpstreamService::with_config("/api", vec![
-            "http://127.0.0.1:8080".to_string(),  // API server 1
-            "http://127.0.0.1:8081".to_string(),  // API server 2
-        ], 10, 2), // 10s timeout, retry up to 2 servers
-        // Future services can be added here, e.g.:
-        // UpstreamService::new("/web", vec!["http://127.0.0.1:3001".to_string()]),
-    ];
-    */
-
     let upstream_services = vec![
         UpstreamService::with_config("/py", vec![
             "http://127.0.0.1:8082".to_string(),  // Timeout server
@@ -125,17 +115,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "http://127.0.0.1:8081".to_string(),  // Normal server
             // "http://127.0.0.1:8082".to_string(),  // Timeout server
         ], 10, 2), // 10s timeout, retry up to 2 servers
+        // Future services can be added here, e.g.:
+        // UpstreamService::new("/node", vec!["http://127.0.0.1:3001".to_string()]),
+        // UpstreamService::new("/go", vec!["http://127.0.0.1:8081".to_string()]),
 
-        // UpstreamService::with_config("/go", vec![
-        //     "http://127.0.0.1:8082".to_string(),  // Timeout server
-        //     "http://127.0.0.1:8081".to_string(),  // Normal server
-        // ], 10, 2)
+        UpstreamService::with_config("/go", vec![
+            "http://127.0.0.1:8082".to_string(),  // Timeout server
+            "http://127.0.0.1:8081".to_string(),  // Normal server
+        ], 10, 2)
     ];
 
     // Build our application with routes and middleware
     let app = Router::new()
         .route("/health", get(health_handler))
-        // .route("/envoy/status", get(envoy_status_handler))
+        .route("/envoy/status", get(envoy_status_handler))
         .fallback(proxy_handler)
         .with_state((client, upstream_services))
         .layer(
@@ -146,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let version = request.version();
 
                     tracing::info_span!(
-                        "envoy_request",
+                        "http_request",
                         method = %method,
                         uri = %uri,
                         version = ?version,
@@ -155,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
                     tracing::info!(
-                        "LeylineEnvoy processing request: {} {} {:?}",
+                        "started processing request: {} {} {:?}",
                         request.method(),
                         request.uri(),
                         request.version()
@@ -163,14 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .on_response(|response: &axum::http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
                     tracing::info!(
-                        "LeylineEnvoy completed request: status={}, latency={:?}",
+                        "finished processing request: status={}, latency={:?}",
                         response.status(),
                         latency
                     );
                 })
                 .on_failure(|error: tower_http::classify::ServerErrorsFailureClass, latency: std::time::Duration, _span: &tracing::Span| {
                     tracing::error!(
-                        "LeylineEnvoy request failed: error={:?}, latency={:?}",
+                        "request failed: error={:?}, latency={:?}",
                         error,
                         latency
                     );
@@ -178,29 +171,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     // Run our app with hyper
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000)); // Different port: 4000
-    tracing::info!("LeylineEnvoy starting on {}", addr);
+    let addr = SocketAddr::from(([127, 0, 0, 1], 4000));
+    tracing::debug!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "LeylineEnvoy OK")
+    (StatusCode::OK, "OK")
 }
 
-// async fn envoy_status_handler() -> impl IntoResponse {
-//     (
-//         StatusCode::OK,
-//         axum::Json(serde_json::json!({
-//             "service": "LeylineEnvoy",
-//             "version": "0.1.0",
-//             "status": "healthy",
-//             "description": "Advanced API Gateway with load balancing and retry",
-//             "port": 4000
-//         }))
-//     )
-// }
+async fn envoy_status_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "service": "LeylineEnvoy",
+            "version": "0.1.0",
+            "status": "healthy",
+            "description": "Advanced API Gateway with load balancing and retry",
+            "port": 4000
+        }))
+    )
+}
 
 async fn proxy_handler(
     axum::extract::State((client, upstream_services)): axum::extract::State<(Client, Vec<UpstreamService>)>,
@@ -236,60 +229,44 @@ async fn proxy_handler(
         return Ok((StatusCode::METHOD_NOT_ALLOWED, "Method not allowed").into_response());
     }
 
-    // First, try the load-balanced server (normal round-robin)
-    let primary_upstream_url = upstream_service.get_next_upstream();
-    let primary_uri = uri_template.replace("{}", primary_upstream_url);
+    // Try each upstream server with retry logic
+    let mut last_error = None;
+    let start_index = upstream_service.load_balancer.current.load(Ordering::SeqCst);
 
-    tracing::debug!("LeylineEnvoy routing to upstream server: {}", primary_upstream_url);
-
-    match client.get(&primary_uri).send().await {
-        Ok(response) => {
-            if response.status().is_success() {
-                tracing::debug!("LeylineEnvoy successful response from: {}", primary_upstream_url);
-                let body = response.text().await?;
-                return Ok((StatusCode::OK, body).into_response());
-            } else {
-                let status = response.status();
-                tracing::warn!("LeylineEnvoy primary upstream server {} returned error status: {}", primary_upstream_url, status);
-            }
-        }
-        Err(e) => {
-            tracing::warn!("LeylineEnvoy failed to connect to primary upstream server {}: {}", primary_upstream_url, e);
-        }
-    }
-
-    // Primary server failed, now try other servers as fallback
-    tracing::info!("LeylineEnvoy primary server failed, trying other servers...");
-
-    // Try remaining servers in order (excluding the primary one we just tried)
-    let primary_index = upstream_service.upstream_urls.iter().position(|url| url == primary_upstream_url).unwrap();
-
-    for offset in 1..upstream_service.upstream_urls.len() {
-        let server_index = (primary_index + offset) % upstream_service.upstream_urls.len();
+    for attempt in 0..upstream_service.max_retries {
+        let server_index = (start_index + attempt) % upstream_service.upstream_urls.len();
         let upstream_url = upstream_service.get_upstream_by_index(server_index);
         let upstream_uri = uri_template.replace("{}", upstream_url);
 
-        tracing::debug!("LeylineEnvoy retrying with upstream server: {} (fallback {}/{})",
-                       upstream_url, offset, upstream_service.upstream_urls.len() - 1);
+        tracing::debug!("attempting request to upstream server: {} (attempt {}/{})",
+                       upstream_url, attempt + 1, upstream_service.max_retries);
 
         match client.get(&upstream_uri).send().await {
             Ok(response) => {
                 if response.status().is_success() {
-                    tracing::debug!("LeylineEnvoy successful response from fallback server: {}", upstream_url);
+                    tracing::debug!("successful response from: {}", upstream_url);
                     let body = response.text().await?;
                     return Ok((StatusCode::OK, body).into_response());
                 } else {
                     let status = response.status();
-                    tracing::warn!("LeylineEnvoy fallback upstream server {} returned error status: {}", upstream_url, status);
+                    tracing::warn!("upstream server {} returned error status: {}", upstream_url, status);
+                    // Create a simple error for non-success status codes
+                    last_error = Some(GatewayError::Config(format!("Upstream server returned error status: {}", status)));
                 }
             }
             Err(e) => {
-                tracing::warn!("LeylineEnvoy failed to connect to fallback upstream server {}: {}", upstream_url, e);
+                tracing::warn!("failed to connect to upstream server {}: {}", upstream_url, e);
+                last_error = Some(GatewayError::HttpRequest(e));
             }
+        }
+
+        // If this is not the last attempt, continue to next server
+        if attempt < upstream_service.max_retries - 1 {
+            tracing::info!("retrying with next upstream server...");
         }
     }
 
-    // All servers failed
-    tracing::error!("LeylineEnvoy all upstream servers failed for service {}", upstream_service.prefix);
-    Err(GatewayError::Internal)
+    // All retries failed
+    tracing::error!("all upstream servers failed after {} attempts", upstream_service.max_retries);
+    Err(last_error.unwrap_or_else(|| GatewayError::Internal))
 }
