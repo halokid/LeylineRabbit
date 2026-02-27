@@ -1,9 +1,10 @@
 use axum::{
     extract::Request,
-    http::StatusCode,
+    http::{StatusCode, HeaderName, HeaderValue},
     response::IntoResponse,
     routing::get,
     Router,
+    body::Body,
 };
 use leyline_error::GatewayError;
 use reqwest::Client;
@@ -13,6 +14,14 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing_appender;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use http_body_util::BodyExt;
+
+// API keys for authentication
+const API_KEYS: &[&str] = &[
+    "my-secret-api-key-12345",
+    "another-api-key-67890",
+    "third-api-key-abcdef",
+];
 
 #[derive(Debug, Clone)]
 struct UpstreamService {
@@ -75,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing with console and file output
     let file_appender = tracing_appender::rolling::daily("./logs", "leyline-rabbit.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -106,18 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         })?;
 
-    /* 
     // Configure upstream services with path prefixes
-    let upstream_services = vec![
-        UpstreamService::with_config("/api", vec![
-            "http://127.0.0.1:8080".to_string(),  // API server 1
-            "http://127.0.0.1:8081".to_string(),  // API server 2
-        ], 10, 2), // 10s timeout, retry up to 2 servers
-        // Future services can be added here, e.g.:
-        // UpstreamService::new("/web", vec!["http://127.0.0.1:3001".to_string()]),
-    ];
-    */
-
     let upstream_services = vec![
         UpstreamService::with_config("/py", vec![
             "http://127.0.0.1:8082".to_string(),  // Timeout server
@@ -125,17 +123,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "http://127.0.0.1:8081".to_string(),  // Normal server
             // "http://127.0.0.1:8082".to_string(),  // Timeout server
         ], 10, 2), // 10s timeout, retry up to 2 servers
+        // Future services can be added here, e.g.:
+        // UpstreamService::new("/node", vec!["http://127.0.0.1:3001".to_string()]),
+        // UpstreamService::new("/go", vec!["http://127.0.0.1:8081".to_string()]),
 
-        // UpstreamService::with_config("/go", vec![
-        //     "http://127.0.0.1:8082".to_string(),  // Timeout server
-        //     "http://127.0.0.1:8081".to_string(),  // Normal server
-        // ], 10, 2)
+        UpstreamService::with_config("/go", vec![
+            "http://127.0.0.1:8082".to_string(),  // Timeout server
+            "http://127.0.0.1:8081".to_string(),  // Normal server
+        ], 10, 2)
     ];
 
     // Build our application with routes and middleware
     let app = Router::new()
         .route("/health", get(health_handler))
-        // .route("/envoy/status", get(envoy_status_handler))
+        .route("/ping", get(ping_handler))
         .fallback(proxy_handler)
         .with_state((client, upstream_services))
         .layer(
@@ -146,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let version = request.version();
 
                     tracing::info_span!(
-                        "envoy_request",
+                        "http_request",
                         method = %method,
                         uri = %uri,
                         version = ?version,
@@ -155,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .on_request(|request: &axum::http::Request<_>, _span: &tracing::Span| {
                     tracing::info!(
-                        "LeylineRabbit processing request: {} {} {:?}",
+                        "started processing request: {} {} {:?}",
                         request.method(),
                         request.uri(),
                         request.version()
@@ -163,14 +164,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .on_response(|response: &axum::http::Response<_>, latency: std::time::Duration, _span: &tracing::Span| {
                     tracing::info!(
-                        "LeylineRabbit completed request: status={}, latency={:?}",
+                        "finished processing request: status={}, latency={:?}",
                         response.status(),
                         latency
                     );
                 })
                 .on_failure(|error: tower_http::classify::ServerErrorsFailureClass, latency: std::time::Duration, _span: &tracing::Span| {
                     tracing::error!(
-                        "LeylineRabbit request failed: error={:?}, latency={:?}",
+                        "request failed: error={:?}, latency={:?}",
                         error,
                         latency
                     );
@@ -178,34 +179,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
     // Run our app with hyper
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000)); // Different port: 4000
-    tracing::info!("LeylineRabbit starting on {}", addr);
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    tracing::debug!("listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "LeylineRabbit OK")
+    (StatusCode::OK, "OK")
 }
 
-// async fn envoy_status_handler() -> impl IntoResponse {
-//     (
-//         StatusCode::OK,
-//         axum::Json(serde_json::json!({
-//             "service": "LeylineRabbit",
-//             "version": "0.1.0",
-//             "status": "healthy",
-//             "description": "Advanced API Gateway with load balancing and retry",
-//             "port": 4000
-//         }))
-//     )
-// }
+async fn ping_handler() -> impl IntoResponse {
+    (StatusCode::OK, "pong")
+}
 
 async fn proxy_handler(
     axum::extract::State((client, upstream_services)): axum::extract::State<(Client, Vec<UpstreamService>)>,
-    req: Request,
+    mut req: Request,
 ) -> Result<impl IntoResponse, GatewayError> {
+    // Check API key for proxy requests (check against multiple valid keys)
+    let api_key_header = req.headers().get("x-api-key");
+    if let Some(api_key) = api_key_header {
+        if !API_KEYS.contains(&api_key.to_str().unwrap_or("")) {
+            return Ok((StatusCode::UNAUTHORIZED, "Invalid API key").into_response());
+        }
+    } else {
+        return Ok((StatusCode::UNAUTHORIZED, "API key required").into_response());
+    }
+
     let path = req.uri().path();
 
     // Find matching upstream service based on path prefix
@@ -231,65 +233,131 @@ async fn proxy_handler(
         format!("{{}}{}", upstream_path)
     };
 
-    // For MVP, only proxy GET requests
-    if req.method() != axum::http::Method::GET {
-        return Ok((StatusCode::METHOD_NOT_ALLOWED, "Method not allowed").into_response());
-    }
+    // Try each upstream server with retry logic
+    let mut last_error = None;
+    let start_index = upstream_service.load_balancer.current.load(Ordering::SeqCst);
 
-    // First, try the load-balanced server (normal round-robin)
-    let primary_upstream_url = upstream_service.get_next_upstream();
-    let primary_uri = uri_template.replace("{}", primary_upstream_url);
-
-    tracing::debug!("LeylineRabbit routing to upstream server: {}", primary_upstream_url);
-
-    match client.get(&primary_uri).send().await {
-        Ok(response) => {
-            if response.status().is_success() {
-                tracing::debug!("LeylineRabbit successful response from: {}", primary_upstream_url);
-                let body = response.text().await?;
-                return Ok((StatusCode::OK, body).into_response());
-            } else {
-                let status = response.status();
-                tracing::warn!("LeylineRabbit primary upstream server {} returned error status: {}", primary_upstream_url, status);
-            }
-        }
-        Err(e) => {
-            tracing::warn!("LeylineRabbit failed to connect to primary upstream server {}: {}", primary_upstream_url, e);
-        }
-    }
-
-    // Primary server failed, now try other servers as fallback
-    tracing::info!("LeylineRabbit primary server failed, trying other servers...");
-
-    // Try remaining servers in order (excluding the primary one we just tried)
-    let primary_index = upstream_service.upstream_urls.iter().position(|url| url == primary_upstream_url).unwrap();
-
-    for offset in 1..upstream_service.upstream_urls.len() {
-        let server_index = (primary_index + offset) % upstream_service.upstream_urls.len();
+    for attempt in 0..upstream_service.max_retries {
+        let server_index = (start_index + attempt) % upstream_service.upstream_urls.len();
         let upstream_url = upstream_service.get_upstream_by_index(server_index);
         let upstream_uri = uri_template.replace("{}", upstream_url);
 
-        tracing::debug!("LeylineRabbit retrying with upstream server: {} (fallback {}/{})",
-                       upstream_url, offset, upstream_service.upstream_urls.len() - 1);
+        tracing::debug!("attempting request to upstream server: {} (attempt {}/{})",
+                       upstream_url, attempt + 1, upstream_service.max_retries);
 
-        match client.get(&upstream_uri).send().await {
+        // Build the request with the exact same method, headers, and body as the original
+        // Convert axum Method to reqwest Method
+        let method = match *req.method() {
+            axum::http::Method::GET => reqwest::Method::GET,
+            axum::http::Method::POST => reqwest::Method::POST,
+            axum::http::Method::PUT => reqwest::Method::PUT,
+            axum::http::Method::DELETE => reqwest::Method::DELETE,
+            axum::http::Method::HEAD => reqwest::Method::HEAD,
+            axum::http::Method::OPTIONS => reqwest::Method::OPTIONS,
+            axum::http::Method::PATCH => reqwest::Method::PATCH,
+            _ => {
+                tracing::warn!("Unsupported HTTP method: {}", req.method());
+                return Ok((StatusCode::METHOD_NOT_ALLOWED, "Method not supported").into_response());
+            }
+        };
+
+        let mut request_builder = client.request(method, &upstream_uri);
+
+        // Forward all headers (except host which will be set by reqwest)
+        for (key, value) in req.headers().iter() {
+            if key != "host" {
+                if let Ok(k) = key.as_str().parse::<reqwest::header::HeaderName>() {
+                    request_builder = request_builder.header(k, value.as_bytes());
+                }
+            }
+        }
+
+        // Forward the request body efficiently
+        match req.method() {
+            &axum::http::Method::GET | &axum::http::Method::HEAD => {
+                // These methods typically don't have bodies - no body to forward
+            },
+            _ => {
+                // For methods with bodies, collect and forward
+                // NOTE: This reads the body into memory for simplicity.
+                // For true zero-copy streaming, we'd need to use hyper directly
+                // instead of reqwest, which is more complex but more efficient
+                // for large payloads.
+                match req.body_mut().collect().await {
+                    Ok(collected) => {
+                        let body_bytes = collected.to_bytes();
+                        request_builder = request_builder.body(body_bytes.to_vec());
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to read request body: {}", e);
+                        return Err(GatewayError::Internal);
+                    }
+                }
+            }
+        }
+
+        match request_builder.send().await {
             Ok(response) => {
-                if response.status().is_success() {
-                    tracing::debug!("LeylineRabbit successful response from fallback server: {}", upstream_url);
-                    let body = response.text().await?;
-                    return Ok((StatusCode::OK, body).into_response());
+                let status = response.status();
+
+                // For successful responses, forward everything back
+                if status.is_success() || status.is_redirection() || status.is_informational() || status.is_client_error() {
+                    tracing::debug!("successful response from: {} with status: {}", upstream_url, status);
+
+                    // Collect response headers first (before consuming the response)
+                    let headers: Vec<(String, Vec<u8>)> = response.headers()
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
+                        .collect();
+
+                    // Collect response body
+                    let body = match response.bytes().await {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::error!("Failed to read response body: {}", e);
+                            return Err(GatewayError::Internal);
+                        }
+                    };
+
+                    // Build response with original status and headers
+                    let status_code = axum::http::StatusCode::from_u16(status.as_u16())
+                        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+                    let mut response_builder = axum::response::Response::builder()
+                        .status(status_code);
+
+                    // Forward response headers
+                    for (key, value_bytes) in headers {
+                        if let (Ok(k), Ok(v)) = (
+                            key.parse::<axum::http::HeaderName>(),
+                            axum::http::HeaderValue::from_bytes(&value_bytes)
+                        ) {
+                            response_builder = response_builder.header(k, v);
+                        }
+                    }
+
+                    return Ok(response_builder
+                        .body(axum::body::Body::from(body))
+                        .unwrap());
                 } else {
-                    let status = response.status();
-                    tracing::warn!("LeylineRabbit fallback upstream server {} returned error status: {}", upstream_url, status);
+                    // Server errors - try next server
+                    tracing::warn!("upstream server {} returned server error status: {}", upstream_url, status);
+                    last_error = Some(GatewayError::Config(format!("Upstream server returned server error status: {}", status)));
                 }
             }
             Err(e) => {
-                tracing::warn!("LeylineRabbit failed to connect to fallback upstream server {}: {}", upstream_url, e);
+                tracing::warn!("failed to connect to upstream server {}: {}", upstream_url, e);
+                last_error = Some(GatewayError::HttpRequest(e));
             }
+        }
+
+        // If this is not the last attempt, continue to next server
+        if attempt < upstream_service.max_retries - 1 {
+            tracing::info!("retrying with next upstream server...");
         }
     }
 
-    // All servers failed
-    tracing::error!("LeylineRabbit all upstream servers failed for service {}", upstream_service.prefix);
-    Err(GatewayError::Internal)
+    // All retries failed
+    tracing::error!("all upstream servers failed after {} attempts", upstream_service.max_retries);
+    Err(last_error.unwrap_or_else(|| GatewayError::Internal))
 }

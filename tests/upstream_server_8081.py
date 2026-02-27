@@ -11,5 +11,17 @@ def ping():
         "port": 8081
     })
 
+
+@app.route('/posttest', methods=['POST'])
+def posttest():
+    return jsonify({
+        "message": "posttest",
+        "upstream": "flask-server-8081",
+        "status": "healthy",
+        "port": 8081
+    })
+
+
+
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=8081, debug=True)
