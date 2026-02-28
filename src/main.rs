@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create HTTP client for proxying requests with timeout
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))            // TODO: timeout set work here, is globaly
         .build()
         .map_err(|e| {
             tracing::error!("Failed to create HTTP client: {}", e);
@@ -346,8 +346,16 @@ async fn proxy_handler(
                 }
             }
             Err(e) => {
-                tracing::warn!("failed to connect to upstream server {}: {}", upstream_url, e);
-                last_error = Some(GatewayError::HttpRequest(e));
+                // Check if it's a timeout or network error
+                if e.is_timeout() {
+                    println!("node {} has timeout problem", upstream_url);
+                    tracing::warn!("request to upstream server {} timed out after {} seconds", upstream_url, upstream_service.timeout_seconds);
+                    last_error = Some(GatewayError::Timeout);
+                } else {
+                    println!("node {} has problem", upstream_url);
+                    tracing::warn!("failed to connect to upstream server {}: {}", upstream_url, e);
+                    last_error = Some(GatewayError::HttpRequest(e));
+                }
             }
         }
 
