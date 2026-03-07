@@ -107,10 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Create HTTP client for proxying requests with timeout
-    // Disable connection pooling to avoid socket hang up issues with some servers (like Gin)
+    // Disable connection pooling and automatic features to avoid socket hang up issues with some servers (like Gin)
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(15))            // TODO: timeout set work here, is globaly
         .pool_max_idle_per_host(0)  // Disable connection pooling to prevent socket issues
+        .no_gzip()                  // Disable automatic gzip decompression
+        .no_deflate()               // Disable automatic deflate decompression
+        .no_brotli()                // Disable automatic brotli decompression
+        .redirect(reqwest::redirect::Policy::none())  // Disable automatic redirects
         .build()
         .map_err(|e| {
             tracing::error!("Failed to create HTTP client: {}", e);
@@ -276,6 +280,8 @@ async fn proxy_handler(
             "trailers",
             "transfer-encoding",
             "upgrade",
+            "accept-encoding",  // Skip compression headers that can cause issues
+            "accept",          // Some servers are sensitive to accept headers
         ];
 
         for (key, value) in req.headers().iter() {
@@ -286,6 +292,9 @@ async fn proxy_handler(
                 }
             }
         }
+
+        // Set a standard User-Agent to avoid issues with some servers
+        request_builder = request_builder.header("user-agent", "Leyline-Rabbit-Gateway/1.0");
 
         // Forward the request body efficiently
         match req.method() {
@@ -348,13 +357,24 @@ async fn proxy_handler(
                     let mut response_builder = axum::response::Response::builder()
                         .status(status_code);
 
-                    // Forward response headers
+                    // Forward response headers (skip problematic ones)
+                    let response_headers_to_skip = [
+                        "connection",
+                        "keep-alive",
+                        "transfer-encoding",
+                        "content-encoding",  // Skip encoding headers since we disabled decompression
+                        "content-length",    // Let axum handle content-length
+                    ];
+
                     for (key, value_bytes) in headers {
-                        if let (Ok(k), Ok(v)) = (
-                            key.parse::<axum::http::HeaderName>(),
-                            axum::http::HeaderValue::from_bytes(&value_bytes)
-                        ) {
-                            response_builder = response_builder.header(k, v);
+                        let key_str = key.to_lowercase();
+                        if !response_headers_to_skip.contains(&key_str.as_str()) {
+                            if let (Ok(k), Ok(v)) = (
+                                key.parse::<axum::http::HeaderName>(),
+                                axum::http::HeaderValue::from_bytes(&value_bytes)
+                            ) {
+                                response_builder = response_builder.header(k, v);
+                            }
                         }
                     }
 
