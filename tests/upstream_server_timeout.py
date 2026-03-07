@@ -6,7 +6,7 @@ app = Flask(__name__)
 @app.route('/ping', methods=['GET'])
 def ping():
     # Simulate timeout by sleeping for 15 seconds (longer than gateway's 10s timeout)
-    time.sleep(20)
+    # time.sleep(20)
     # time.sleep(2)
     return jsonify({
         "message": "pong",
@@ -19,7 +19,7 @@ def ping():
 @app.route('/posttest', methods=['POST'])
 def posttest():
     # Simulate timeout by sleeping for 15 seconds (longer than gateway's 10s timeout)
-    time.sleep(20)
+    # time.sleep(20)
     # time.sleep(2)
     return jsonify({
         "message": "posttest",

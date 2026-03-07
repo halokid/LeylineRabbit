@@ -107,8 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Create HTTP client for proxying requests with timeout
+    // Disable connection pooling to avoid socket hang up issues with some servers (like Gin)
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(15))            // TODO: timeout set work here, is globaly
+        .pool_max_idle_per_host(0)  // Disable connection pooling to prevent socket issues
         .build()
         .map_err(|e| {
             tracing::error!("Failed to create HTTP client: {}", e);
@@ -263,9 +265,22 @@ async fn proxy_handler(
 
         let mut request_builder = client.request(method, &upstream_uri);
 
-        // Forward all headers (except host which will be set by reqwest)
+        // Forward all headers (except problematic ones that can cause socket hang up)
+        let headers_to_skip = [
+            "host",
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailers",
+            "transfer-encoding",
+            "upgrade",
+        ];
+
         for (key, value) in req.headers().iter() {
-            if key != "host" {
+            let key_str = key.as_str().to_lowercase();
+            if !headers_to_skip.contains(&key_str.as_str()) {
                 if let Ok(k) = key.as_str().parse::<reqwest::header::HeaderName>() {
                     request_builder = request_builder.header(k, value.as_bytes());
                 }
@@ -286,6 +301,13 @@ async fn proxy_handler(
                 match req.body_mut().collect().await {
                     Ok(collected) => {
                         let body_bytes = collected.to_bytes();
+                        let body_len = body_bytes.len();
+
+                        // Set Content-Length header explicitly to avoid socket hang up issues
+                        if let Ok(content_length_header) = "content-length".parse::<reqwest::header::HeaderName>() {
+                            request_builder = request_builder.header(content_length_header, body_len.to_string());
+                        }
+
                         request_builder = request_builder.body(body_bytes.to_vec());
                     },
                     Err(e) => {
